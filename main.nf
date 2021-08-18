@@ -95,7 +95,7 @@ if (params.input_paths){
 
    if ( params.merge_lanes_rounds ) {
 
-       Channel.fromPath( inputs )
+       Channel.fromPath( params.input )
            .map{ itg = ( it =~ /^.*\/(round[1-2])\/([a-zA-Z]{3})?.*r([1-2]{1})_?.*_R([1-2]{1})?.*\.fastq\.gz$/ )[0]
                    return [ itg[2].toUpperCase(), itg[4], "rep${itg[3]}", itg[1], it ] }
            .set{ LR_MERGE_FLAT }
