@@ -437,6 +437,7 @@ if (params.merge_lanes_rounds) {
     RAW_READS_MERGED_FULL
       // groupTuple on sample (not read) for splitFastq
       .groupTuple(by: [0])
+      // add map step to sort it[1], it[2] on numeric and string?
       .map{ it -> [ it[0], it[1], it[2][0], it[2][1] ] }
       // check that splitFastq preserves tuple ordering for transpose
       .splitFastq( by: params.fastq_chunks_size, pe:true, file: true, compress:true)
@@ -445,7 +446,9 @@ if (params.merge_lanes_rounds) {
       .map{ it -> [ "${it[0]}_R${it[1]}", it[2] ] }
       .set{ RAW_READS_MERGED_OUT }
   } else {
-    RAW_READS_MERGED_FULL.set{ RAW_READS_MERGED_OUT }
+    RAW_READS_MERGED_FULL
+      .map{ it -> [ "${it[0]}_R${it[1]}", it[2] ] }
+      .set{ RAW_READS_MERGED_OUT }
   }
 
 }
