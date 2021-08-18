@@ -83,36 +83,61 @@ if (params.input_paths){
    Channel
       .from( params.input_paths )
       .map { row -> [ row[0], [file(row[1][0]), file(row[1][1])]] }
-      .separate( raw_reads, raw_reads_2 ) { a -> [tuple(a[0] + "_R1", a[1][0]), tuple(a[0] + "_R2", a[1][1])] }
+      .multiMap { a ->
+          read1: [ a[0] + "_R1", a[1][0] ]
+          read2: [ a[0] + "_R2", a[1][1] ]
+          }
+      .set{ RAW_READS_IN }
 
 }else{
-   raw_reads = Channel.create()
-   raw_reads_2 = Channel.create()
 
-   if ( params.split_fastq ){
-      Channel
-         .fromFilePairs( params.input, flat:true )
-         .splitFastq( by: params.fastq_chunks_size, pe:true, file: true, compress:true)
-         .separate( raw_reads, raw_reads_2 ) { a -> [tuple(a[0] + "_R1", a[1]), tuple(a[0] + "_R2", a[2])] }
-   }else{
-      Channel
-         .fromFilePairs( params.input )
-	 .separate( raw_reads, raw_reads_2 ) { a -> [tuple(a[0] + "_R1", a[1][0]), tuple(a[0] + "_R2", a[1][1])] }
+   // optionally merge lanes/rounds/reps per sample first
+
+   if ( params.merge_lanes_rounds ) {
+
+       Channel.fromPath( inputs )
+           .map{ itg = ( it =~ /^.*\/(round[1-2])\/([a-zA-Z]{3})?.*r([1-2]{1})_?.*_R([1-2]{1})?.*\.fastq\.gz$/ )[0]
+                   return [ itg[2].toUpperCase(), itg[4], "rep${itg[3]}", itg[1], it ] }
+           .set{ LR_MERGE_FLAT }
+
+       if (params.merge_reps) {
+          LR_MERGE_FLAT
+            .groupTuple(by: [0,1])
+            .map{ it -> [ "${it[0]}", it[1] it[4] ] }
+            .set{ LR_MERGE }
+       } else {
+         LR_MERGE_FLAT
+           .groupTuple(by: [0,1,2])
+           .map{ it -> [ "${it[0]}_${it[2]}", it[1], it[4] ] }
+           .set{ LR_MERGE }
+       }
+
+   } else {
+
+       LR_MERGE = Channel.empty
+
+       if ( params.split_fastq ){
+          Channel
+             .fromFilePairs( params.input, flat:true )
+             .splitFastq( by: params.fastq_chunks_size, pe:true, file: true, compress:true)
+             .multiMap { a ->
+                 read1: [ a[0] + "_R1", a[1] ]
+                 read2: [ a[0] + "_R2", a[2] ]
+                 }
+             .set{ RAW_READS_IN }
+       }else{
+          Channel
+             .fromFilePairs( params.input )
+             .multiMap { a ->
+                 read1: [ a[0] + "_R1", a[1][0] ]
+                 read2: [ a[0] + "_R2", a[1][1] ]
+                 }
+             .set{ RAW_READS_IN }
+       }
+
    }
-}
 
-// Update sample name if splitFastq is used
-def updateSampleName(x) {
-   if ((matcher = x[1] =~ /\s*(\.[\d]+).fastq.gz/)) {
-        res = matcher[0][1]
-   }
-   return [x[0] + res, x[1]]
-}
 
-if (params.split_fastq ){
-  raw_reads = raw_reads.concat( raw_reads_2 ).map{it -> updateSampleName(it)}.dump(tag:'input')
-}else{
-  raw_reads = raw_reads.concat( raw_reads_2 ).dump(tag:'input')
 }
 
 /*
@@ -179,7 +204,7 @@ if (params.res_tads && !params.skip_tads){
   tads_res_insulation=Channel.empty()
   tads_bin=Channel.empty()
   if (!params.skip_tads){
-    log.warn "[nf-core/hic] Hi-C resolution for TADs calling not specified. See --res_tads" 
+    log.warn "[nf-core/hic] Hi-C resolution for TADs calling not specified. See --res_tads"
   }
 }
 
@@ -194,7 +219,7 @@ if (params.res_dist_decay && !params.skip_dist_decay){
   ddecay_res = Channel.create()
   ddecay_bin = Channel.create()
   if (!params.skip_dist_decay){
-    log.warn "[nf-core/hic] Hi-C resolution for distance decay not specified. See --res_dist_decay" 
+    log.warn "[nf-core/hic] Hi-C resolution for distance decay not specified. See --res_dist_decay"
   }
 }
 
@@ -212,7 +237,7 @@ if (params.res_compartments && !params.skip_compartments){
   fasta_for_compartments = Channel.empty()
   comp_res = Channel.create()
   if (!params.skip_compartments){
-    log.warn "[nf-core/hic] Hi-C resolution for compartment calling not specified. See --res_compartments" 
+    log.warn "[nf-core/hic] Hi-C resolution for compartment calling not specified. See --res_compartments"
   }
 }
 
@@ -386,6 +411,71 @@ if(!params.restriction_fragments && params.fasta && !params.dnase){
       }
  }
 
+ process fastq_merge {
+   tag "$sample"
+   label 'process_low'
+   publishDir path: { params.save_merge ? "${params.outdir}/fastq_merge" : params.outdir },
+              saveAs: { params.save_merge ? it : null }, mode: params.publish_dir_mode
+
+   input:
+   tuple sample, read, path(reads) from LR_MERGE
+
+   output:
+   tuple sample, read, path(mreads) into RAW_READS_MERGED_FULL
+
+   script:
+   mreads = "${sample}.fastq.gz"
+   fqstring = reads.findAll{ it.toString().endsWith('.fastq.gz') }.sort()
+   """
+   cat ${fqstring.join(' ')} > $mreads
+   """
+}
+
+
+if (params.merge_lanes_rounds) {
+  if ( params.split_fastq ) {
+    RAW_READS_MERGED_FULL
+      // groupTuple on sample (not read) for splitFastq
+      .groupTuple(by: [0])
+      .map{ it -> [ it[0], it[1], it[2][0], it[2][1] ] }
+      // check that splitFastq preserves tuple ordering for transpose
+      .splitFastq( by: params.fastq_chunks_size, pe:true, file: true, compress:true)
+      .map{ it -> [ it[0], it[1], [it[2], it[3]] ] } // convert to string and sort here?
+      .transpose()
+      .map{ it -> [ "${it[0]}_R${it[1]}", it[2] ] }
+      .set{ RAW_READS_MERGED_OUT }
+  } else {
+    RAW_READS_MERGED_FULL.set{ RAW_READS_MERGED_OUT }
+  }
+
+}
+
+
+( RAW_READS_IN_BOTH,
+  RAW_READS_MERGED ) = ( params.merge_lanes_rounds
+
+                       ? [ Channel.empty(),
+                           RAW_READS_MERGED_OUT ]
+
+                       : [ RAW_READS_IN.read1.concat( RAW_READS_IN.read2 ),
+                           Channel.empty() ]
+
+                       )
+
+// Update sample name if splitFastq is used
+def updateSampleName(x) {
+  if ((matcher = x[1] =~ /\s*(\.[\d]+).fastq.gz/)) {
+       res = matcher[0][1]
+  }
+  return [x[0] + res, x[1]]
+}
+
+if (params.split_fastq ){
+ raw_reads = RAW_READS_IN_BOTH.mix(RAW_READS_MERGED).map{it -> updateSampleName(it)}.dump(tag:'input')
+}else{
+ raw_reads = RAW_READS_IN_BOTH.mix(RAW_READS_MERGED).dump(tag:'input')
+}
+
 /****************************************************
  * MAIN WORKFLOW
  */
@@ -439,7 +529,7 @@ process trim_reads {
    label 'process_low'
    publishDir path: { params.save_aligned_intermediates ? "${params.outdir}/mapping/bwt2_trimmed" : params.outdir },
               saveAs: { filename -> if (params.save_aligned_intermediates) filename }, mode: params.publish_dir_mode
-              
+
    when:
    !params.dnase
 
@@ -532,7 +622,7 @@ if (!params.dnase){
    process dnase_mapping_stats{
       tag "$sample = $bam"
       label 'process_medium'
-      publishDir "${params.outdir}/hicpro/mapping",  mode: params.publish_dir_mode, 
+      publishDir "${params.outdir}/hicpro/mapping",  mode: params.publish_dir_mode,
    	      saveAs: { filename -> if (params.save_aligned_intermediates && filename.endsWith("stat")) "stats/$filename"
 	                else if (params.save_aligned_intermediates) filename}
 
@@ -641,7 +731,7 @@ else{
       tag "$sample"
       label 'process_low'
       publishDir "${params.outdir}/hicpro/valid_pairs", mode: params.publish_dir_mode,
-   	      saveAs: {filename -> if (filename.endsWith("RSstat")) "stats/$filename" 
+   	      saveAs: {filename -> if (filename.endsWith("RSstat")) "stats/$filename"
                                    else filename}
 
       input:
@@ -674,7 +764,7 @@ process remove_duplicates {
    tag "$sample"
    label 'process_highmem'
    publishDir "${params.outdir}/hicpro/valid_pairs", mode: params.publish_dir_mode,
-               saveAs: {filename -> if (filename.endsWith("mergestat")) "stats/$filename" 
+               saveAs: {filename -> if (filename.endsWith("mergestat")) "stats/$filename"
                                     else if (filename.endsWith("allValidPairs")) "$filename"}
    input:
    set val(sample), file(vpairs) from valid_pairs.groupTuple()
@@ -700,9 +790,9 @@ process remove_duplicates {
 
    ## Count short range (<20000) vs long range contacts
    awk 'BEGIN{cis=0;trans=0;sr=0;lr=0} \$2 == \$5{cis=cis+1; d=\$6>\$3?\$6-\$3:\$3-\$6; if (d<=20000){sr=sr+1}else{lr=lr+1}} \$2!=\$5{trans=trans+1}END{print "trans_interaction\\t"trans"\\ncis_interaction\\t"cis"\\ncis_shortRange\\t"sr"\\ncis_longRange\\t"lr}' ${sample}.allValidPairs >> ${sample}_allValidPairs.mergestat
- 
+
    ## For MultiQC
-   mkdir -p stats/${sample} 
+   mkdir -p stats/${sample}
    cp ${sample}_allValidPairs.mergestat stats/${sample}/
    """
    }else{
@@ -768,7 +858,7 @@ process build_contact_maps{
 
    output:
    set val(sample), val(mres), file("*.matrix"), file("*.bed") into raw_maps, raw_maps_4cool
-   
+
    script:
    """
    build_matrix --matrix-format upper  --binsize ${mres} --chrsizes ${chrsize} --ifile ${vpairs} --oprefix ${sample}_${mres}
@@ -912,7 +1002,7 @@ process cooler_zoomify {
  */
 
 if (!params.skip_dist_decay){
-  chddecay = maps_hicexplorer_ddecay.combine(ddecay_res).filter{ it[1] == it[3] }.dump(tag: "ddecay") 
+  chddecay = maps_hicexplorer_ddecay.combine(ddecay_res).filter{ it[1] == it[3] }.dump(tag: "ddecay")
 }else{
   chddecay = Channel.empty()
 }
@@ -927,7 +1017,7 @@ process dist_decay {
 
   input:
   set val(sample), val(res), file(maps), val(r) from chddecay
-  
+
   output:
   file("*_distcount.txt")
   file("*.png")
@@ -970,7 +1060,7 @@ process compartment_calling {
   script:
   """
   cooltools genome binnify --all-names ${chrsize} ${res} > genome_bins.txt
-  cooltools genome gc genome_bins.txt ${fasta} > genome_gc.txt 
+  cooltools genome gc genome_bins.txt ${fasta} > genome_gc.txt
   cooltools call-compartments --contact-type cis -o ${sample}_compartments ${cool}
   awk -F"\t" 'NR>1{OFS="\t"; if(\$6==""){\$6=0}; print \$1,\$2,\$3,\$6}' ${sample}_compartments.cis.vecs.tsv | sort -k1,1 -k2,2n > ${sample}_compartments.cis.E1.bedgraph
   """
