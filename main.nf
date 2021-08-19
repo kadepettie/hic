@@ -103,7 +103,7 @@ if (params.input_paths){
        if (params.merge_reps) {
           LR_MERGE_FLAT
             .groupTuple(by: [0,1])
-            .map{ it -> [ "${it[0]}", it[1] it[4] ] }
+            .map{ it -> [ "${it[0]}", it[1], it[4] ] }
             .set{ LR_MERGE }
        } else {
          LR_MERGE_FLAT
