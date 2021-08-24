@@ -103,11 +103,15 @@ if (params.input_paths){
        if (params.merge_reps) {
           LR_MERGE_FLAT
             .groupTuple(by: [0,1])
+            // keep read end suffix and sample name separated for
+            // splitFastq grouping later
             .map{ it -> [ "${it[0]}", it[1], it[4] ] }
             .set{ LR_MERGE }
        } else {
          LR_MERGE_FLAT
            .groupTuple(by: [0,1,2])
+           // keep read end suffix and sample name separated for
+           // splitFastq grouping later
            .map{ it -> [ "${it[0]}_${it[2]}", it[1], it[4] ] }
            .set{ LR_MERGE }
        }
@@ -149,7 +153,7 @@ if ( params.bwt2_index ){
 
    Channel.fromPath( params.bwt2_index , checkIfExists: true)
       .ifEmpty { exit 1, "Genome index: Provided index not found: ${params.bwt2_index}" }
-      .into { bwt2_index_end2end; bwt2_index_trim }
+      .into { bwt2_index_end2end; bwt2_index_trim; bwt2_index_remap }
 
 }
 else if ( params.fasta ) {
@@ -357,8 +361,7 @@ if(!params.bwt2_index && params.fasta){
         file fasta from fasta_for_index
 
         output:
-        file "bowtie2_index" into bwt2_index_end2end
-	file "bowtie2_index" into bwt2_index_trim
+        file "bowtie2_index" into bwt2_index_end2end, bwt2_index_trim, bwt2_index_remap
 
         script:
         fasta_base = fasta.toString() - ~/(\.fa)?(\.fasta)?(\.fas)?(\.fsa)?$/
@@ -424,6 +427,10 @@ if(!params.restriction_fragments && params.fasta && !params.dnase){
    tuple sample, read, path(mreads) into RAW_READS_MERGED_FULL
 
    script:
+   // Currently sample does not include read end suffix so this information
+   // is excluded in downstream steps that parse the file name directly for
+   // labeling (not sure if this will affect hornet mapping with --rg SM:${prefix})
+   // TODO: add _R${read} to mreads below
    mreads = "${sample}.fastq.gz"
    fqstring = reads.findAll{ it.toString().endsWith('.fastq.gz') }.sort()
    """
@@ -502,6 +509,8 @@ process bowtie2_end_to_end {
    set val(sample), file("${prefix}.bam") into end_to_end_bam
 
    script:
+   // reads fname generated in merge_fastq (if merge_lanes)
+   // currently does not contain read end info (contained in sample)
    prefix = reads.toString() - ~/(\.fq)?(\.fastq)?(\.gz)?$/
    def bwt2_opts = params.bwt2_opts_end2end
    if (!params.dnase){
@@ -663,7 +672,10 @@ process combine_mates{
    set val(sample), file(aligned_bam) from bwt2_merged_bam.groupTuple()
 
    output:
-   set val(oname), file("${sample}_bwt2pairs.bam") into paired_bam
+   // keep chunk index here for groupTuple in hornet/wasp
+   // chunk index is removed (if split_fastq) during valid_interactions
+   // before duplicate removal
+   set val(sample), file("${sample}_bwt2pairs.bam") into paired_bam_prehornet_unsort
    set val(oname), file("*.pairstat") into all_pairstat
 
    script:
@@ -685,12 +697,363 @@ process combine_mates{
 }
 
 /*
+ * Hornet mapping - allelic bias filtering on mapped reads
+ */
+
+Channel.fromPath( params.sample_info )
+  .combine( Channel.fromList( params.vcf_pops ) )
+  .set{ LD_IDS }
+
+process get_vcf_inds {
+  tag "$pops"
+  label 'r'
+  publishDir "${params.outdir}/inds/",  mode: params.publish_dir_mode
+
+  input:
+  tuple path(si), pops from LD_IDS
+
+  output:
+  tuple pops, path(name) into VCF_INDS
+
+  script:
+  name = "${pops}.individuals.txt"
+  """
+  Rscript ${params.bin}/get_1kg_pop_individuals.R \
+  --sample_info $si \
+  --pops $pops \
+  --name $name
+  """
+
+}
+
+Channel.fromPath( params.vcf_dir + '/' + params.vcf_stem )
+    .combine(VCF_INDS)
+    .combine( Channel.of(params.maf) )
+    .combine( Channel.of(params.mac) )
+    .set{ VCFS }
+
+process subset_vcf {
+  tag "$chrom, MAF/MAC $maf/$mac: $pops"
+  label 'snps'
+  publishDir "${params.outdir}/vcfs/$pops/maf${maf}mac${mac}/",  mode: params.publish_dir_mode
+
+  input:
+  tuple file(vcf), pops, path(inds), maf, mac from VCFS
+
+  output:
+  tuple pops, maf, mac, path(outname) into VCFS_SUB
+
+  script:
+  (vcfname, chrom) = ( vcf.getName() =~ /ALL\.(chr[0-9,X,Y]{1,2})\..+$/ )[0]
+  outname = "${chrom}.vcf.gz"
+  if (maf) {
+    allele_filt_string = "--maf $maf"
+  } else {
+    allele_filt_string = "--mac $mac"
+  }
+  """
+  vcftools \
+  --gzvcf $vcf \
+  --keep $inds \
+  $allele_filt_string \
+  --recode \
+  --stdout \
+  | bgzip -c \
+  > $outname
+  """
+
+}
+
+process get_snps {
+  tag "$chrom"
+  label 'snps'
+  publishDir "${params.outdir}/snps/maf${maf}mac${mac}/",  mode: params.publish_dir_mode
+
+  input:
+  tuple pops, maf, mac, path(vcf) from VCFS_SUB
+
+  output:
+  tuple maf, mac, path(snpout) into SNPIDS // ${chr}.snps.txt.gz
+
+  shell:
+  chrom = vcf.simpleName
+  snpout = "${chrom}.snps.txt.gz"
+  // for now throw out copy number variants other insertion types (preceded by '<')
+  // TODO: check escape characters working properly
+  '''
+  pigz -dc !{vcf} \
+  | grep -v '^#' \
+  | awk '{{printf ("%s\\t%s\\t%s\\n", $2, $4, $5)}}' \
+  | grep -v -e \\< \
+  | pigz \
+  > !{snpout}
+  '''
+
+}
+
+SNPIDS
+    .groupTuple( by: [0,1] )
+    .set{ SNPAGG }
+
+process coordsort_hornet {
+  tag "$sample"
+  label 'samtools'
+  publishDir path: { params.save_aligned_intermediates ? "${params.outdir}/hicpro/mapping/hornet" : params.outdir },
+         saveAs: { filename -> if (params.save_aligned_intermediates) filename }, mode: params.publish_dir_mode
+
+  input:
+  tuple sample, path("uncoordsort.bam") from paired_bam_prehornet_unsort
+
+  output:
+  tuple sample, path(outbam) into paried_bam_prehornet, COUNT_INITIAL
+
+  script:
+  outbam = "${sample}_bwt2pairs.bam"
+  """
+  samtools sort \
+  --threads ${task.cpus} \
+  -o $outbam \
+  uncoordsort.bam
+  """
+}
+
+process find_intersecting_snps {
+  tag "$sample, MAF/MAC $maf/$mac"
+  label 'intersecting'
+  publishDir path: { params.save_aligned_intermediates ? "${params.outdir}/hicpro/mapping/hornet/maf${maf}mac${mac}/" : params.outdir },
+         saveAs: { filename -> if (params.save_aligned_intermediates) filename }, mode: params.publish_dir_mode
+
+  input:
+  tuple sample, path(inbam), maf, mac, path(snps) from paired_bam_prehornet.combine( SNPAGG  )
+
+  output:
+  tuple sample, maf, mac, 1, path("*.fq1.gz") into REMAP1
+  tuple sample, maf, mac, 2, path("*.fq2.gz") into REMAP2
+  tuple sample, maf, mac, path("*.to.remap.bam") into FILT_REMAP, COUNT_REMAP
+  tuple sample, maf, mac, path("*.keep.bam") into KEEP_MERGE, COUNT_KEEP
+
+  script:
+  """
+  python ${params.hornet_code}/find_intersecting_snps.py \
+  -p \
+  $inbam \
+  .
+  """
+
+}
+
+process bowtie2_on_remap_reads {
+   tag "$sample, R${mate}"
+   label 'process_medium'
+   publishDir path: { params.save_aligned_intermediates ? "${params.outdir}/hicpro/mapping/hornet/maf${maf}mac${mac}/" : params.outdir },
+   	      saveAs: { filename -> if (params.save_aligned_intermediates) filename }, mode: params.publish_dir_mode
+
+   input:
+   tuple sample, maf, mac, mate, path(reads) from REMAP1.concat(REMAP2)
+   file index from bwt2_index_remap.collect()
+
+   output:
+   tuple sample, maf, mac, mate, path(outbam) into REMAPPED_SEP // groupTuple
+
+   script:
+   // exclude read suffix from prefix in case necessary for --rg SM:${prefix} matching
+   prefix = sample.toString()
+   outunsort = "${sample}_R${mate}.remap.unnamesort.bam"
+   outbam = "${sample}_R${mate}.remap.bam"
+   """
+   INDEX=`find -L ./ -name "*.rev.1.bt2" | sed 's/.rev.1.bt2//'`
+   bowtie2 --rg-id BMG --rg SM:${prefix} \\
+           ${params.bwt2_opts_trimmed} \\
+           -p ${task.cpus} \\
+           -x \${INDEX} \\
+           -U ${reads} | samtools view -bS - > $outunsort; \
+   samtools sort \
+   -n \
+   --threads ${task.cpus} \
+   -o $outbam \
+   $outunsort
+   """
+}
+
+process combine_remapped_mates{
+   tag "$sample = $r1_prefix + $r2_prefix"
+   label 'process_low'
+   publishDir "${params.outdir}/hicpro/mapping/hornet/maf${maf}mac${mac}/", mode: params.publish_dir_mode,
+   	      saveAs: {filename -> filename.endsWith(".pairstat") ? "stats/$filename" : "$filename"}
+
+   input:
+   tuple sample, maf, mac, mate, path(aligned_bam) from REMAPPED_SEP.groupTuple(by: [0,1,2])
+
+   output:
+   tuple sample, maf, mac, path(outbam) into REMAPPED
+   tuple oname, file("*.pairstat") // into all_pairstat
+
+   script:
+   r1_bam = aligned_bam[0]
+   r1_prefix = r1_bam.toString() - ~/.remap.bam$/
+   r2_bam = aligned_bam[1]
+   r2_prefix = r2_bam.toString() - ~/.remap.bam$/
+   oname = sample.toString() - ~/(\.[0-9]+)$/
+   outbam = "${sample}.remap.bam"
+   def opts = "-t"
+   if (params.keep_multi) {
+     opts="${opts} --multi"
+   }else if (params.min_mapq){
+     opts="${opts} -q ${params.min_mapq}"
+   }
+   """
+   mergeSAM.py -f ${r1_bam} -r ${r2_bam} -o $outbam ${opts}
+   """
+}
+
+process filter_remapped {
+  tag "$sample"
+  label 'filter'
+  publishDir path: { params.save_aligned_intermediates ? "${params.outdir}/hicpro/mapping/hornet/maf${maf}mac${mac}/" : params.outdir },
+         saveAs: { filename -> if (params.save_aligned_intermediates) filename }, mode: params.publish_dir_mode
+
+  input:
+  tuple sample, maf, mac, path(orig), path(remapped) from FILT_REMAP.combine( REMAPPED, by: [0,1,2] )
+
+  output:
+  tuple sample, maf, mac, path(outbam) into KEPT_MERGE, COUNT_KEPT
+
+  script:
+  outbam = "${sample}.kept.bam"
+  """
+  python ${params.hornet_code}/filter_remapped_reads.py \
+  -p \
+  $orig \
+  $remapped \
+  $outbam
+  """
+
+}
+
+process hornet_merge_namesort {
+  tag "$sample"
+  label 'samtools'
+  publishDir path: { params.save_aligned_intermediates ? "${params.outdir}/hicpro/mapping/hornet/maf${maf}mac${mac}/" : params.outdir },
+         saveAs: { filename -> if (params.save_aligned_intermediates) filename }, mode: params.publish_dir_mode
+
+  input:
+  tuple sample, maf, mac, path(keep), path(kept) from KEEP_MERGE.combine( KEPT_MERGE, by: [0,1,2] )
+
+  output:
+  tuple sample, path(outbam) into paired_bam
+  tuple sample, maf, mac, path(outbam) into COUNT_FINAL
+
+  script:
+  outunsort = "${sample}.uncoordsort.bam"
+  outbam = "${sample}_bwt2pairs.bam"
+  """
+  samtools merge \
+  --threads ${params.samcores} \
+  $outunsort \
+  $keep \
+  $kept; \
+  samtools sort \
+  -n \
+  --threads ${params.samcores} \
+  -o $outbam \
+  $outunsort
+  """
+
+}
+
+COUNT_INITIAL.map{ it -> [ 'initial', it[0], '_', '_', it[2] ] }
+  .concat( COUNT_KEEP.map{ it -> [ 'no_var', it[0], it[1], it[2], it[3] ] } )
+  .concat( COUNT_REMAP.map{ it -> [ 'var', it[0], it[1], it[2], it[3] ] } )
+  .concat( COUNT_KEPT.map{ it -> [ 'kept_var', it[0], it[1], it[2], it[3] ] } )
+  .concat( COUNT_FINAL.map{ it -> [ 'final', it[0], it[1], it[2], it[3] ] } )
+  .set{ COUNT }
+
+process count_reads {
+  label 'count'
+  publishDir "${params.outdir}/counts/separate/maf${maf}mac${mac}/"
+  stageInMode { rtype=='raw' ? 'symlink' : 'rellink' }
+
+  cpus { rtype in ['raw', 'trimmed'] ? 1 : params.samcores }
+  memory { rtype in ['raw', 'trimmed'] ? '4G' : '8G' }
+
+  when:
+  params.mode =~ /(all)/
+
+  input:
+  tuple rtype, sample, maf, mac, path(reads) from COUNT
+
+  output:
+  tuple maf, mac, path(outname) into CONCAT_COUNTS
+
+  shell:
+  outname = "${sample}_${rtype}.PE_read_count.txt"
+  if ( rtype in ['raw', 'trimmed'] ) {
+    '''
+    l1=$(zcat !{reads[0]} | wc -l); \
+    l2=$(zcat !{reads[1]} | wc -l); \
+    r1=$( echo $l1/4 | bc); \
+    r2=$( echo $l2/4 | bc); \
+    rt=$( echo $r1+$r2 | bc); \
+    p=$( echo $rt/2 | bc); \
+    echo !{sample} $'\t' !{rtype} $'\t' $p > !{outname}
+    '''
+  } else {
+    '''
+    r=$(samtools flagstat --threads !{params.samcores} !{reads} | head -5 | tail -1 | cut -f 1 -d ' '); \
+    p=$( echo $r/2 | bc); \
+    echo !{sample} $'\t' !{rtype} $'\t' $p > !{outname}
+    '''
+  }
+
+}
+
+CONCAT_COUNTS
+    .branch{
+        PRE_HORNET: it[0]=='_' && it[1]=='_'
+            return it[2]
+        HORNET:     true
+    }
+    .set{ CONCAT_COUNTS_BR }
+
+Channel.of( params.maf )
+    .combine( Channel.of( params.mac ) )
+    .combine( CONCAT_COUNTS_BR.PRE_HORNET )
+    .concat( CONCAT_COUNTS_BR.HORNET )
+    .groupTuple( by: [0,1] )
+    .set{ CONCAT_COUNTS_FINAL }
+
+process concat_counts {
+  publishDir "${params.outdir}/counts/maf${maf}mac${mac}/"
+
+  time = '10m'
+
+  when:
+  params.mode =~ /(all)/
+
+  input:
+  tuple maf, mac, path(countlist) from CONCAT_COUNTS_FINAL
+
+  output:
+  path(outname) into PLOT_COUNTS
+
+  shell:
+  counts = countlist.findAll{ it.toString().endsWith('.txt') }.sort()
+  colnames = ['sample','map_step','PE_reads']
+  outname = "PE_read_counts.txt"
+  '''
+  echo !{colnames.join(" \\$'\\t' ")} > !{outname}; \
+  cat !{counts.join(' ')} >> !{outname}
+  '''
+
+}
+
+/*
  * HiC-Pro - detect valid interaction from aligned data
  */
 
 if (!params.dnase){
    process get_valid_interaction{
-      tag "$sample"
+      tag "$sample_in"
       label 'process_low'
       publishDir "${params.outdir}/hicpro/valid_pairs", mode: params.publish_dir_mode,
    	      saveAs: {filename -> if (filename.endsWith("RSstat")) "stats/$filename"
@@ -698,7 +1061,7 @@ if (!params.dnase){
                                    else if (params.save_nonvalid_pairs) filename}
 
       input:
-      set val(sample), file(pe_bam) from paired_bam
+      set val(sample_in), file(pe_bam) from paired_bam
       file frag_file from res_frag_file.collect()
 
       output:
@@ -712,7 +1075,7 @@ if (!params.dnase){
 
       script:
       if (params.split_fastq){
-         sample = sample.toString() - ~/(\.[0-9]+)$/
+         sample = sample_in.toString() - ~/(\.[0-9]+)$/
       }
 
       def opts = ""
@@ -731,14 +1094,14 @@ if (!params.dnase){
 }
 else{
    process get_valid_interaction_dnase{
-      tag "$sample"
+      tag "$sample_in"
       label 'process_low'
       publishDir "${params.outdir}/hicpro/valid_pairs", mode: params.publish_dir_mode,
    	      saveAs: {filename -> if (filename.endsWith("RSstat")) "stats/$filename"
                                    else filename}
 
       input:
-      set val(sample), file(pe_bam) from paired_bam
+      set val(sample_in), file(pe_bam) from paired_bam
 
       output:
       set val(sample), file("*.validPairs") into valid_pairs
@@ -747,7 +1110,7 @@ else{
 
       script:
       if (params.split_fastq){
-         sample = sample.toString() - ~/(\.[0-9]+)$/
+         sample = sample_in.toString() - ~/(\.[0-9]+)$/
       }
 
       opts = params.min_cis_dist > 0 ? " -d ${params.min_cis_dist}" : ''
@@ -760,7 +1123,7 @@ else{
 }
 
 /*
- * Remove duplicates
+ * Merge chunks (if split_fastq) and Remove duplicates
  */
 
 process remove_duplicates {
