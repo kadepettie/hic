@@ -706,6 +706,8 @@ process get_vcf_inds {
   tag "$pops"
   label 'r'
   publishDir "${params.outdir}/inds/",  mode: params.publish_dir_mode
+  
+  module 'R/4.1.0'
 
   input:
   tuple path(si), pops from LD_IDS
