@@ -424,8 +424,8 @@ if(!params.restriction_fragments && params.fasta && !params.dnase){
    tuple sample, read, path(mreads) into RAW_READS_MERGED_FULL
 
    script:
-   mreads = "${sample}.fastq.gz"
-   fqstring = reads.findAll{ it.toString().endsWith('.fastq.gz') }.sort()
+   mreads = "${sample}_R${read}.fastq.gz"
+   fqstring = reads.collect{ it.getName() }.sort()
    """
    cat ${fqstring.join(' ')} > $mreads
    """
@@ -667,9 +667,11 @@ process combine_mates{
    set val(oname), file("*.pairstat") into all_pairstat
 
    script:
-   r1_bam = aligned_bam[0]
+   // in case -f/-r correspondence to _R1 and _R2 matters
+   aligned_bam_sort = aligned_bam.collect{ it.getName() }.sort()
+   r1_bam = aligned_bam_sort[0]
    r1_prefix = r1_bam.toString() - ~/_bwt2merged.bam$/
-   r2_bam = aligned_bam[1]
+   r2_bam = aligned_bam_sort[1]
    r2_prefix = r2_bam.toString() - ~/_bwt2merged.bam$/
    oname = sample.toString() - ~/(\.[0-9]+)$/
 
