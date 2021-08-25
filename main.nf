@@ -675,9 +675,11 @@ process combine_mates{
    set val(oname), file("*.pairstat") into all_pairstat
 
    script:
-   r1_bam = aligned_bam[0]
+   // in case -f/-r correspondence to _R1 and _R2 matters
+   aligned_bam_sort = aligned_bam.collect{ it.getName() }.sort()
+   r1_bam = aligned_bam_sort[0]
    r1_prefix = r1_bam.toString() - ~/_bwt2merged.bam$/
-   r2_bam = aligned_bam[1]
+   r2_bam = aligned_bam_sort[1]
    r2_prefix = r2_bam.toString() - ~/_bwt2merged.bam$/
    oname = sample.toString() - ~/(\.[0-9]+)$/
 
@@ -885,10 +887,12 @@ process combine_remapped_mates{
    tuple oname, file("*.pairstat") // into all_pairstat
 
    script:
-   r1_bam = aligned_bam[0]
-   r1_prefix = r1_bam.toString() - ~/.remap.bam$/
-   r2_bam = aligned_bam[1]
-   r2_prefix = r2_bam.toString() - ~/.remap.bam$/
+   // in case -f/-r correspondence to _R1 and _R2 matters
+   aligned_bam_sort = aligned_bam.collect{ it.getName() }.sort()
+   r1_bam = aligned_bam_sort[0]
+   r1_prefix = r1_bam.toString() - ~/_bwt2merged.bam$/
+   r2_bam = aligned_bam_sort[1]
+   r2_prefix = r2_bam.toString() - ~/_bwt2merged.bam$/
    oname = sample.toString() - ~/(\.[0-9]+)$/
    outbam = "${sample}.remap.bam"
    def opts = "-t"
@@ -957,7 +961,7 @@ process hornet_merge_namesort {
 
 }
 
-COUNT_INITIAL.map{ it -> [ 'initial', it[0], '_', '_', it[2] ] }
+COUNT_INITIAL.map{ it -> [ 'initial', it[0], '_', '_', it[1] ] }
   .concat( COUNT_KEEP.map{ it -> [ 'no_var', it[0], it[1], it[2], it[3] ] } )
   .concat( COUNT_REMAP.map{ it -> [ 'var', it[0], it[1], it[2], it[3] ] } )
   .concat( COUNT_KEPT.map{ it -> [ 'kept_var', it[0], it[1], it[2], it[3] ] } )
