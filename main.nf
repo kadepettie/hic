@@ -716,7 +716,7 @@ process get_vcf_inds {
   script:
   name = "${pops}.individuals.txt"
   """
-  Rscript ${params.bin}/get_1kg_pop_individuals.R \
+  Rscript ${params.1kgbin}/get_1kg_pop_individuals.R \
   --sample_info $si \
   --pops $pops \
   --name $name
@@ -803,7 +803,7 @@ process coordsort_hornet {
   tuple sample, path("uncoordsort.bam") from paired_bam_prehornet_unsort
 
   output:
-  tuple sample, path(outbam) into paried_bam_prehornet, COUNT_INITIAL
+  tuple sample, path(outbam) into paired_bam_prehornet, COUNT_INITIAL
 
   script:
   outbam = "${sample}_bwt2pairs.bam"
