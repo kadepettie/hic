@@ -716,7 +716,7 @@ process get_vcf_inds {
   script:
   name = "${pops}.individuals.txt"
   """
-  Rscript ${params.1kgbin}/get_1kg_pop_individuals.R \
+  Rscript ${params.kgbin}/get_1kg_pop_individuals.R \
   --sample_info $si \
   --pops $pops \
   --name $name
