@@ -428,7 +428,7 @@ if(!params.restriction_fragments && params.fasta && !params.dnase){
 
    script:
    mreads = "${sample}_R${read}.fastq.gz"
-   fqstring = reads.collect{ it.getName() }.sort()
+   fqstring = reads.collect{ file(it).getName() }.sort()
    """
    cat ${fqstring.join(' ')} > $mreads
    """
@@ -676,7 +676,7 @@ process combine_mates{
 
    script:
    // in case -f/-r correspondence to _R1 and _R2 matters
-   aligned_bam_sort = aligned_bam.collect{ it.getName() }.sort()
+   aligned_bam_sort = aligned_bam.collect{ file(it).getName() }.sort()
    r1_bam = aligned_bam_sort[0]
    r1_prefix = r1_bam.toString() - ~/_bwt2merged.bam$/
    r2_bam = aligned_bam_sort[1]
@@ -825,8 +825,8 @@ process find_intersecting_snps {
   tuple sample, path(inbam), maf, mac, path(snps) from paired_bam_prehornet.combine( SNPAGG  )
 
   output:
-  tuple sample, maf, mac, 1, path("*.fq1.gz") into REMAP1
-  tuple sample, maf, mac, 2, path("*.fq2.gz") into REMAP2
+  tuple sample, maf, mac, '1', path("*.fq1.gz") into REMAP1
+  tuple sample, maf, mac, '2', path("*.fq2.gz") into REMAP2
   tuple sample, maf, mac, path("*.to.remap.bam") into FILT_REMAP, COUNT_REMAP
   tuple sample, maf, mac, path("*.keep.bam") into KEEP_MERGE, COUNT_KEEP
 
@@ -888,7 +888,7 @@ process combine_remapped_mates{
 
    script:
    // in case -f/-r correspondence to _R1 and _R2 matters
-   aligned_bam_sort = aligned_bam.collect{ it.getName() }.sort()
+   aligned_bam_sort = aligned_bam.collect{ file(it).getName() }.sort()
    r1_bam = aligned_bam_sort[0]
    r1_prefix = r1_bam.toString() - ~/_bwt2merged.bam$/
    r2_bam = aligned_bam_sort[1]
