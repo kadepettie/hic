@@ -427,12 +427,8 @@ if(!params.restriction_fragments && params.fasta && !params.dnase){
    tuple sample, read, path(mreads) into RAW_READS_MERGED_FULL
 
    script:
-   // Currently sample does not include read end suffix so this information
-   // is excluded in downstream steps that parse the file name directly for
-   // labeling (not sure if this will affect hornet mapping with --rg SM:${prefix})
-   // TODO: add _R${read} to mreads below
-   mreads = "${sample}.fastq.gz"
-   fqstring = reads.findAll{ it.toString().endsWith('.fastq.gz') }.sort()
+   mreads = "${sample}_R${read}.fastq.gz"
+   fqstring = reads.collect{ it.getName() }.sort()
    """
    cat ${fqstring.join(' ')} > $mreads
    """
