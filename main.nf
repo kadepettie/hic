@@ -706,7 +706,7 @@ process get_vcf_inds {
   tag "$pops"
   label 'r'
   publishDir "${params.outdir}/inds/",  mode: params.publish_dir_mode
-  
+
   module 'R/4.1.0'
 
   input:
@@ -805,7 +805,7 @@ process coordsort_hornet {
   tuple sample, path("uncoordsort.bam") from paired_bam_prehornet_unsort
 
   output:
-  tuple sample, path(outbam) into paired_bam_prehornet, COUNT_INITIAL
+  tuple sample, path(outbam) into paired_bam_prehornet_chunks, COUNT_INITIAL
 
   script:
   outbam = "${sample}_bwt2pairs.bam"
@@ -816,6 +816,34 @@ process coordsort_hornet {
   uncoordsort.bam
   """
 }
+
+paired_bam_prehornet_chunks
+  .map{ it -> [ it[0].toString() - ~/(\.[0-9]+)$/, it[1] ]}
+  .set{ paired_bam_prehornet_chunkgroups }
+
+process mergechunks_hornet {
+  tag "$sample"
+  label 'samtools'
+  publishDir path: { params.save_aligned_intermediates ? "${params.outdir}/hicpro/mapping/hornet/mergechunks" : params.outdir },
+         saveAs: { filename -> if (params.save_aligned_intermediates) filename }, mode: params.publish_dir_mode
+
+  input:
+  tuple sample, path(bams) from paired_bam_prehornet_chunkgroups.groupTuple()
+
+  output:
+  tuple sample, path(outbam) into paired_bam_prehornet
+
+  script:
+  bamstring = bams.collect{ it.getName() }.sort()
+  outbam = "${sample}_bwt2pairs.bam"
+  """
+  samtools merge \
+  --threads ${task.cpus} \
+  $outbam \
+  ${bamstring.join(' ')}
+  """
+}
+
 
 process find_intersecting_snps {
   tag "$sample, MAF/MAC $maf/$mac"
