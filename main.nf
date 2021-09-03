@@ -28,6 +28,10 @@ if (params.validate_params) {
     NfcoreSchema.validateParameters(params, json_schema, log)
 }
 
+
+fqcd = file(params.fastq_chunks_dir)
+if( !fqcd.exists() ) fqcd.mkdir()
+
 // Check if genome exists in the config file
 if (params.genomes && params.genome && !params.genomes.containsKey(params.genome)) {
     exit 1, "The provided genome '${params.genome}' is not available in the iGenomes file. Currently the available genomes are ${params.genomes.keySet().join(', ')}"
@@ -123,7 +127,7 @@ if (params.input_paths){
        if ( params.split_fastq ){
           Channel
              .fromFilePairs( params.input, flat:true )
-             .splitFastq( by: params.fastq_chunks_size, pe:true, file: true, compress:true)
+             .splitFastq( by: params.fastq_chunks_size, pe:true, file: params.fastq_chunks_dir, compress:true)
              .multiMap { a ->
                  read1: [ a[0] + "_R1", a[1] ]
                  read2: [ a[0] + "_R2", a[2] ]
@@ -417,9 +421,10 @@ if(!params.restriction_fragments && params.fasta && !params.dnase){
  process fastq_merge {
    tag "$sample"
    label 'process_low'
-   publishDir path: { params.save_merge ? "${params.outdir}/fastq_merge" : params.outdir },
-              saveAs: { params.save_merge ? it : null }, mode: params.publish_dir_mode
-
+   // publishDir path: { params.save_merge ? "${params.outdir}/fastq_merge" : params.outdir },
+   //            saveAs: { params.save_merge ? it : null }, mode: params.publish_dir_mode
+   storeDir "${params.outdir}/fastq_merge"
+   
    input:
    tuple sample, read, path(reads) from LR_MERGE
 
@@ -665,7 +670,7 @@ process combine_mates{
    	      saveAs: {filename -> filename.endsWith(".pairstat") ? "stats/$filename" : "$filename"}
 
    input:
-   set val(sample), file(aligned_bam) from bwt2_merged_bam.groupTuple()
+   set val(sample), file(aligned_bam) from bwt2_merged_bam.groupTuple(size: 2)
 
    output:
    // keep chunk index here for groupTuple in hornet/wasp
