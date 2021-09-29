@@ -860,8 +860,8 @@ process find_intersecting_snps {
   tuple sample, path(inbam), maf, mac, path(snps) from paired_bam_prehornet.combine( SNPAGG  )
 
   output:
-  tuple sample, maf, mac, '1', path("*.fq1.gz") into REMAP1
-  tuple sample, maf, mac, '2', path("*.fq2.gz") into REMAP2
+  tuple sample, maf, mac, val('1'), path("*.fq1.gz") into REMAP1
+  tuple sample, maf, mac, val('2'), path("*.fq2.gz") into REMAP2
   tuple sample, maf, mac, path("*.to.remap.bam") into FILT_REMAP, COUNT_REMAP
   tuple sample, maf, mac, path("*.keep.bam") into KEEP_MERGE, COUNT_KEEP
 
