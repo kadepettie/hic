@@ -79,7 +79,7 @@ ch_output_docs_images = file("$projectDir/docs/images/", checkIfExists: true)
  * input read files
  */
 
-if (params.input_paths){
+if (params.input_paths && !params.post_map){
 
    raw_reads = Channel.create()
    raw_reads_2 = Channel.create()
@@ -93,11 +93,11 @@ if (params.input_paths){
           }
       .set{ RAW_READS_IN }
 
-}else{
+} else if (!params.post_map){
 
    // optionally merge lanes/rounds/reps per sample first
 
-   if ( params.merge_lanes_rounds ) {
+   if ( params.merge_lanes_rounds) {
 
        Channel.fromPath( params.input )
            .map{ itg = ( it =~ /^.*\/(round[1-2])\/([a-zA-Z]{3})?.*r([1-2]{1})_?.*_R([1-2]{1})?.*\.fastq\.gz$/ )[0]
@@ -145,6 +145,10 @@ if (params.input_paths){
 
    }
 
+} else {
+
+  LR_MERGE = Channel.empty()
+  RAW_READS_IN = Channel.empty()
 
 }
 
@@ -404,6 +408,8 @@ if(!params.restriction_fragments && params.fasta && !params.dnase){
 	label 'process_low'
         publishDir path: { params.save_reference ? "${params.outdir}/reference_genome" : params.outdir },
                    saveAs: { params.save_reference ? it : null }, mode: params.publish_dir_mode
+        when:
+        !params.post_map
 
         input:
         file fasta from fasta_for_resfrag
@@ -440,7 +446,7 @@ if(!params.restriction_fragments && params.fasta && !params.dnase){
 }
 
 
-if (params.merge_lanes_rounds) {
+if (params.merge_lanes_rounds && !params.post_map) {
   if ( params.split_fastq ) {
     RAW_READS_MERGED_FULL
       // groupTuple on sample (not read) for splitFastq
@@ -448,7 +454,7 @@ if (params.merge_lanes_rounds) {
       // add map step to sort it[1], it[2] on numeric and string?
       .map{ it -> [ it[0], it[1], it[2][0], it[2][1] ] }
       // check that splitFastq preserves tuple ordering for transpose
-      .splitFastq( by: params.fastq_chunks_size, pe:true, file: true, compress:true)
+      .splitFastq( by: params.fastq_chunks_size, pe:true, file: params.fastq_chunks_dir, compress:true)
       .map{ it -> [ it[0], it[1], [it[2], it[3]] ] } // convert to string and sort here?
       .transpose()
       .map{ it -> [ "${it[0]}_R${it[1]}", it[2] ] }
@@ -459,6 +465,8 @@ if (params.merge_lanes_rounds) {
       .set{ RAW_READS_MERGED_OUT }
   }
 
+} else {
+  RAW_READS_MERGED_OUT = Channel.empty()
 }
 
 
@@ -481,10 +489,12 @@ def updateSampleName(x) {
   return [x[0] + res, x[1]]
 }
 
-if (params.split_fastq ){
+if (params.split_fastq && !params.post_map){
  raw_reads = RAW_READS_IN_BOTH.mix(RAW_READS_MERGED).map{it -> updateSampleName(it)}.dump(tag:'input')
-}else{
+}else if (!params.post_map){
  raw_reads = RAW_READS_IN_BOTH.mix(RAW_READS_MERGED).dump(tag:'input')
+} else {
+  raw_reads = Channel.empty()
 }
 
 /****************************************************
@@ -703,9 +713,13 @@ process combine_mates{
  * Hornet mapping - allelic bias filtering on mapped reads
  */
 
-Channel.fromPath( params.sample_info )
-  .combine( Channel.fromList( params.vcf_pops ) )
-  .set{ LD_IDS }
+if (!params.post_map) {
+  Channel.fromPath( params.sample_info )
+    .combine( Channel.fromList( params.vcf_pops ) )
+    .set{ LD_IDS }
+} else {
+  LD_IDS = Channel.empty()
+}
 
 process get_vcf_inds {
   tag "$pops"
@@ -731,11 +745,17 @@ process get_vcf_inds {
 
 }
 
-Channel.fromPath( params.vcf_dir + '/' + params.vcf_stem )
-    .combine(VCF_INDS)
-    .combine( Channel.of(params.maf) )
-    .combine( Channel.of(params.mac) )
-    .set{ VCFS }
+if (!params.post_map) {
+  Channel.fromPath( params.vcf_dir + '/' + params.vcf_stem )
+      .combine(VCF_INDS)
+      .combine( Channel.of(params.maf) )
+      .combine( Channel.of(params.mac) )
+      .set{ VCFS }
+} else {
+  VCFS = Channel.empty()
+}
+
+
 
 process subset_vcf {
   tag "$chrom, MAF/MAC $maf/$mac: $pops"
@@ -1011,9 +1031,6 @@ process count_reads {
   cpus { rtype in ['raw', 'trimmed'] ? 1 : params.samcores }
   memory { rtype in ['raw', 'trimmed'] ? '4G' : '8G' }
 
-  when:
-  params.mode =~ /(all)/
-
   input:
   tuple rtype, sample, maf, mac, path(reads) from COUNT
 
@@ -1061,9 +1078,6 @@ process concat_counts {
   publishDir "${params.outdir}/counts/maf${maf}mac${mac}/"
 
   time = '10m'
-
-  when:
-  params.mode =~ /(all)/
 
   input:
   tuple maf, mac, path(countlist) from CONCAT_COUNTS_FINAL
@@ -1139,7 +1153,7 @@ else{
       set val(sample_in), file(pe_bam) from paired_bam
 
       output:
-      set val(sample), file("*.validPairs") into valid_pairs
+      set val(sample), file("*.validPairs") into valid_pairs_fresh
       set val(sample), file("*.validPairs") into valid_pairs_4cool
       set val(sample), file("*RSstat") into all_rsstat
 
@@ -1159,11 +1173,32 @@ else{
 
 /*
  * Merge chunks (if split_fastq) and Remove duplicates
+ *
+ * If validPairs_dir pre-specified in config skip above
+ * processes and start here
  */
+
+( valid_pairs_new,
+  valid_pairs_old ) = ( params.post_map
+
+                        ? [ Channel.empty(),
+                            Channel.fromPath( params.valid_pairs )
+                              .map{ it -> [ it.getName() - ~/(\.[0-9]+)_.*$/, it ] }
+                              .set{ VALID_PAIRS_STALE }
+                              ]
+
+                        : [ valid_pairs_fresh,
+                            Channel.empty() ]
+
+                        )
+
+valid_pairs_new
+  .mix(valid_pairs_old)
+  .set{ valid_pairs }
 
 process remove_duplicates {
    tag "$sample"
-   label 'process_highmem'
+   label 'sort'
    publishDir "${params.outdir}/hicpro/valid_pairs", mode: params.publish_dir_mode,
                saveAs: {filename -> if (filename.endsWith("mergestat")) "stats/$filename"
                                     else if (filename.endsWith("allValidPairs")) "$filename"}
@@ -1179,9 +1214,13 @@ process remove_duplicates {
    if ( ! params.keep_dups ){
    """
    mkdir -p stats/${sample}
+   mkdir -p ${params.tmpdir}/${sample}
 
    ## Sort valid pairs and remove read pairs with same starts (i.e duplicated read pairs)
-   sort -S 50% -k2,2V -k3,3n -k5,5V -k6,6n -m ${vpairs} | \\
+   sort -S ${params.sortmem} \
+   -T ${params.tmpdir}/${sample} \
+   --parallel=${task.cpus} \
+   -k2,2V -k3,3n -k5,5V -k6,6n -m ${vpairs} | \\
    awk -F"\\t" 'BEGIN{c1=0;c2=0;s1=0;s2=0}(c1!=\$2 || c2!=\$5 || s1!=\$3 || s2!=\$6){print;c1=\$2;c2=\$5;s1=\$3;s2=\$6}' > ${sample}.allValidPairs
 
    echo -n "valid_interaction\t" > ${sample}_allValidPairs.mergestat
