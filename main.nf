@@ -1114,7 +1114,7 @@ if (!params.dnase){
       file frag_file from res_frag_file.collect()
 
       output:
-      set val(sample), file("*.validPairs") into valid_pairs
+      set val(sample), file("*.validPairs") into valid_pairs_fresh
       set val(sample), file("*.validPairs") into valid_pairs_4cool
       set val(sample), file("*.DEPairs") into de_pairs
       set val(sample), file("*.SCPairs") into sc_pairs
