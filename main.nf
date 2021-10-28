@@ -28,9 +28,10 @@ if (params.validate_params) {
     NfcoreSchema.validateParameters(params, json_schema, log)
 }
 
-
-fqcd = file(params.fastq_chunks_dir)
-if( !fqcd.exists() ) fqcd.mkdir()
+if (params.fastq_chunks_dir instanceof String) {
+    fqcd = file(params.fastq_chunks_dir)
+    if( !fqcd.exists() ) fqcd.mkdir()
+}
 
 // Check if genome exists in the config file
 if (params.genomes && params.genome && !params.genomes.containsKey(params.genome)) {
@@ -1114,7 +1115,7 @@ if (!params.dnase){
       file frag_file from res_frag_file.collect()
 
       output:
-      set val(sample), file("*.validPairs") into valid_pairs_fresh
+      set val(sample), file("*.validPairs") into valid_pairs
       set val(sample), file("*.validPairs") into valid_pairs_4cool
       set val(sample), file("*.DEPairs") into de_pairs
       set val(sample), file("*.SCPairs") into sc_pairs
@@ -1178,23 +1179,19 @@ else{
  * processes and start here
  */
 
-( valid_pairs_new,
-  valid_pairs_old ) = ( params.post_map
+( VALID_PAIRS_NEW,
+  VALID_PAIRS_OLD ) = ( params.post_map
 
                         ? [ Channel.empty(),
                             Channel.fromPath( params.valid_pairs )
-                              .map{ it -> [ it.getName() - ~/(\.[0-9]+)_.*$/, it ] }
-                              .set{ VALID_PAIRS_STALE }
-                              ]
+                              .map{ it -> [ it.getName() - ~/(\.[0-9]+)_.*$/, it ] } ]
 
                         : [ valid_pairs_fresh,
                             Channel.empty() ]
 
                         )
 
-valid_pairs_new
-  .mix(valid_pairs_old)
-  .set{ valid_pairs }
+VALID_PAIRS_NEW.mix(VALID_PAIRS_OLD).set{ valid_pairs }
 
 process remove_duplicates {
    tag "$sample"
